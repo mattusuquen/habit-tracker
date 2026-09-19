@@ -1,2 +1,5 @@
 .DS_Store
 mobile/
+
+# Pre-generated art (kept out of git to avoid large binaries)
+web/public/paintings/
