@@ -15,9 +15,10 @@ const HABITS = [
 
 type HabitId = (typeof HABITS)[number]["id"];
 
-// The month we're painting. Change these to move around.
+// The year we're painting, and the newest month that has art / progress.
+// Months after this are "locked" (no painting generated yet).
 const YEAR = 2025;
-const MONTH = 3; // 0-indexed: 3 = April
+const LATEST_MONTH = 6; // 0-indexed: 6 = July
 
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
@@ -29,11 +30,20 @@ const MONTH_SHORT = [
 ];
 const WEEKDAYS = ["S", "M", "T", "W", "T", "F", "S"];
 
-// The "painting" hidden under the tiles. Right now it's just a green gradient
-// (GitHub-contributions green), but this is the ONE place the art lives — swap
-// it for `url(/paintings/april.jpg)` later and everything else keeps working.
-const PAINTING =
+// Shown when a month has no generated art yet (GitHub-contributions green).
+const FALLBACK_GRADIENT =
   "linear-gradient(135deg, #0e4429 0%, #006d32 35%, #26a641 70%, #39d353 100%)";
+
+// Per-month Ghibli-style landscape art. Drop square images in
+// web/public/paintings/ named by month (jan.jpg … dec.jpg) — they're picked up
+// automatically. Any month without a file falls back to the green gradient.
+// Change EXT if you export a different format (e.g. "webp").
+const ART_EXT = "jpg";
+
+// Returns a CSS `background-image` value for a given month (0-indexed).
+function paintingFor(month: number): string {
+  return `url("/paintings/${MONTH_SHORT[month].toLowerCase()}.${ART_EXT}"), ${FALLBACK_GRADIENT}`;
+}
 
 // The color that "covers" an unearned tile (the blank square).
 const COVER_COLOR = "#e8e5dd";
@@ -55,6 +65,20 @@ function buildCells(year: number, month: number) {
   return cells;
 }
 
+// Seed every day of every available month with all habits completed, so the
+// grid starts fully painted by default. Uncheck habits to reveal less.
+function buildAllCompleted(): Record<number, Record<number, Set<HabitId>>> {
+  const all: Record<number, Record<number, Set<HabitId>>> = {};
+  for (let m = 0; m <= LATEST_MONTH; m++) {
+    const days: Record<number, Set<HabitId>> = {};
+    for (let d = 1; d <= daysInMonth(YEAR, m); d++) {
+      days[d] = new Set(HABITS.map((h) => h.id));
+    }
+    all[m] = days;
+  }
+  return all;
+}
+
 function greeting() {
   const h = new Date().getHours();
   if (h < 12) return "Good morning";
@@ -63,27 +87,43 @@ function greeting() {
 }
 
 // A single slice of the shared painting, revealed by `reveal` (0..1).
+// `image` is a CSS background-image value (may include a gradient fallback
+// layer); both layers are sliced identically so the grid forms one picture.
 function PaintTile({
   col,
   row,
   cols,
   rows,
   reveal,
+  image,
 }: {
   col: number;
   row: number;
   cols: number;
   rows: number;
   reveal: number;
+  image: string;
 }) {
+  // Count top-level layers (commas outside parentheses — gradients have their own).
+  let depth = 0;
+  let layers = 1;
+  for (const ch of image) {
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    else if (ch === "," && depth === 0) layers++;
+  }
+  const size = Array(layers).fill(`${cols * 100}% ${rows * 100}%`).join(", ");
+  const pos = Array(layers)
+    .fill(`${(col / (cols - 1)) * 100}% ${(row / (rows - 1)) * 100}%`)
+    .join(", ");
   return (
     <>
       <div
         className="absolute inset-0"
         style={{
-          backgroundImage: PAINTING,
-          backgroundSize: `${cols * 100}% ${rows * 100}%`,
-          backgroundPosition: `${(col / (cols - 1)) * 100}% ${(row / (rows - 1)) * 100}%`,
+          backgroundImage: image,
+          backgroundSize: size,
+          backgroundPosition: pos,
         }}
       />
       <div
@@ -108,7 +148,7 @@ function Sidebar() {
   return (
     <aside className="flex w-60 shrink-0 flex-col border-r border-[#e6e1d7] bg-white p-5">
       <div className="mb-8 flex items-center gap-2 px-2">
-        <IconLeaf className="h-6 w-6 text-[#39d353]" />
+        <IconLeaf className="h-6 w-6 text-accent" />
         <span className="text-lg font-semibold text-[#2b2723]">HabitCanvas</span>
       </div>
       <nav className="flex flex-col gap-1">
@@ -131,7 +171,7 @@ function Sidebar() {
         })}
       </nav>
       <div className="mt-auto px-2">
-        <IconLeaf className="mb-2 h-5 w-5 text-[#39d353]" />
+        <IconLeaf className="mb-2 h-5 w-5 text-accent" />
         <p className="text-xs italic leading-relaxed text-[#8c867b]">
           &ldquo;Small steps,
           <br />
@@ -144,11 +184,19 @@ function Sidebar() {
 
 // ---- Year panel -----------------------------------------------------------
 
-function YearInArt() {
+function YearInArt({
+  viewMonth,
+  latest,
+  onSelect,
+}: {
+  viewMonth: number;
+  latest: number;
+  onSelect: (month: number) => void;
+}) {
   return (
     <div className="rounded-xl border border-[#e6e1d7] bg-white p-5">
       <div className="mb-1 flex items-center gap-2">
-        <IconLeaf className="h-5 w-5 text-[#39d353]" />
+        <IconLeaf className="h-5 w-5 text-accent" />
         <h3 className="font-semibold text-[#2b2723]">Your Year in Art</h3>
       </div>
       <p className="mb-4 text-xs text-[#8c867b]">
@@ -156,25 +204,42 @@ function YearInArt() {
       </p>
       <div className="grid grid-cols-3 gap-3">
         {MONTH_SHORT.map((m, i) => {
-          const locked = i > MONTH;
-          const current = i === MONTH;
+          const locked = i > latest;
+          const current = i === viewMonth;
           return (
-            <div key={m} className="flex flex-col items-center gap-1.5">
+            <button
+              key={m}
+              type="button"
+              disabled={locked}
+              onClick={() => onSelect(i)}
+              className={`flex flex-col items-center gap-1.5 ${
+                locked ? "cursor-default" : "cursor-pointer"
+              }`}
+            >
               <div
-                className={`relative flex aspect-square w-full items-center justify-center overflow-hidden rounded-lg ${
-                  current ? "ring-2 ring-[#39d353]" : ""
-                }`}
+                className={`relative flex aspect-square w-full items-center justify-center overflow-hidden rounded-lg transition-transform ${
+                  current ? "ring-2 ring-accent" : ""
+                } ${locked ? "" : "hover:scale-105"}`}
               >
                 {locked ? (
                   <div className="flex h-full w-full items-center justify-center bg-[#f0ede6]">
                     <IconLock className="h-4 w-4 text-[#bdb7ab]" />
                   </div>
                 ) : (
-                  <div className="absolute inset-0" style={{ backgroundImage: PAINTING }} />
+                  <div
+                    className="absolute inset-0 bg-cover bg-center"
+                    style={{ backgroundImage: paintingFor(i) }}
+                  />
                 )}
               </div>
-              <span className="text-[11px] text-[#8c867b]">{MONTH_NAMES[i]}</span>
-            </div>
+              <span
+                className={`text-[11px] ${
+                  current ? "font-medium text-[#2b2723]" : "text-[#8c867b]"
+                }`}
+              >
+                {MONTH_NAMES[i]}
+              </span>
+            </button>
           );
         })}
       </div>
@@ -182,20 +247,20 @@ function YearInArt() {
   );
 }
 
-function YearProgress() {
-  const monthsDone = MONTH + 1;
+function YearProgress({ latest }: { latest: number }) {
+  const monthsDone = latest + 1;
   const pct = Math.round((monthsDone / 12) * 100);
   return (
     <div className="rounded-xl border border-[#e6e1d7] bg-white p-5">
       <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <IconLeaf className="h-5 w-5 text-[#39d353]" />
+          <IconLeaf className="h-5 w-5 text-accent" />
           <h3 className="font-semibold text-[#2b2723]">Year Progress</h3>
         </div>
         <span className="text-xs text-[#8c867b]">{monthsDone} / 12 months</span>
       </div>
       <div className="h-2 w-full overflow-hidden rounded-full bg-[#f0ede6]">
-        <div className="h-full rounded-full bg-[#39d353]" style={{ width: `${pct}%` }} />
+        <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
       </div>
       <p className="mt-2 text-xs text-[#8c867b]">
         You&rsquo;re {pct}% through the year. Keep going!
@@ -207,38 +272,51 @@ function YearProgress() {
 // ---- Page -----------------------------------------------------------------
 
 export default function Home() {
-  const cells = useMemo(() => buildCells(YEAR, MONTH), []);
+  // Which month is currently being viewed. Start on the newest month with art.
+  const [month, setMonth] = useState(LATEST_MONTH);
+  const [selectedDay, setSelectedDay] = useState<number | null>(null);
+
+  const cells = useMemo(() => buildCells(YEAR, month), [month]);
   const cols = 7;
   const rows = cells.length / cols;
-  const totalDays = daysInMonth(YEAR, MONTH);
+  const totalDays = daysInMonth(YEAR, month);
+  const painting = paintingFor(month);
 
-  // completed[day] = Set of habit ids done that day.
-  const [completed, setCompleted] = useState<Record<number, Set<HabitId>>>({});
-  const [selectedDay, setSelectedDay] = useState<number | null>(null);
+  const goToMonth = (m: number) => {
+    if (m < 0 || m > LATEST_MONTH) return;
+    setMonth(m);
+    setSelectedDay(null);
+  };
+
+  // completed[month][day] = Set of habit ids done that day.
+  const [completed, setCompleted] = useState<
+    Record<number, Record<number, Set<HabitId>>>
+  >(buildAllCompleted);
 
   const toggleHabit = (day: number, habit: HabitId) => {
     setCompleted((prev) => {
-      const next = { ...prev };
-      const set = new Set(next[day] ?? []);
+      const monthMap = { ...(prev[month] ?? {}) };
+      const set = new Set(monthMap[day] ?? []);
       if (set.has(habit)) set.delete(habit);
       else set.add(habit);
-      next[day] = set;
-      return next;
+      monthMap[day] = set;
+      return { ...prev, [month]: monthMap };
     });
   };
 
-  const revealFor = (day: number) => (completed[day]?.size ?? 0) / HABITS.length;
-  const painted = Object.values(completed).filter((s) => s.size > 0).length;
+  const daysDone = completed[month] ?? {};
+  const revealFor = (day: number) => (daysDone[day]?.size ?? 0) / HABITS.length;
+  const painted = Object.values(daysDone).filter((s) => s.size > 0).length;
 
-  // Per-habit monthly totals for the list under the graph.
+  // Per-habit totals for the viewed month (the list under the graph).
   const habitTotals = useMemo(() => {
     const totals: Record<HabitId, number> = {
       workout: 0, read: 0, meditate: 0, nosocial: 0,
     };
-    for (const set of Object.values(completed))
+    for (const set of Object.values(completed[month] ?? {}))
       for (const id of set) totals[id]++;
     return totals;
-  }, [completed]);
+  }, [completed, month]);
 
   const today = new Date().toLocaleDateString("en-US", {
     weekday: "short", month: "short", day: "numeric", year: "numeric",
@@ -261,12 +339,32 @@ export default function Home() {
         <div className="flex flex-col gap-6 xl:flex-row">
           {/* Center: the painting card */}
           <div className="flex-1 rounded-xl border border-[#e6e1d7] bg-white p-6">
-            <div className="mb-1 flex items-baseline justify-between">
-              <h2 className="text-2xl font-semibold">
-                {MONTH_NAMES[MONTH]} {YEAR}
-              </h2>
+            <div className="mb-1 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => goToMonth(month - 1)}
+                  disabled={month === 0}
+                  aria-label="Previous month"
+                  className="flex h-8 w-8 items-center justify-center rounded-md text-[#8c867b] transition-colors hover:bg-[#f0ede6] hover:text-[#2b2723] disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
+                >
+                  <IconChevron className="h-5 w-5" />
+                </button>
+                <h2 className="min-w-[9.5rem] text-center text-2xl font-semibold">
+                  {MONTH_NAMES[month]} {YEAR}
+                </h2>
+                <button
+                  type="button"
+                  onClick={() => goToMonth(month + 1)}
+                  disabled={month === LATEST_MONTH}
+                  aria-label="Next month"
+                  className="flex h-8 w-8 items-center justify-center rounded-md text-[#8c867b] transition-colors hover:bg-[#f0ede6] hover:text-[#2b2723] disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
+                >
+                  <IconChevron className="h-5 w-5 rotate-180" />
+                </button>
+              </div>
               <span className="flex items-center gap-2 rounded-full bg-[#f0ede6] px-3 py-1 text-xs text-[#8c867b]">
-                <span className="h-2 w-2 rounded-full bg-[#39d353]" />
+                <span className="h-2 w-2 rounded-full bg-accent" />
                 {painted} / {totalDays} days
               </span>
             </div>
@@ -296,8 +394,8 @@ export default function Home() {
                 // Blank padding cells render as prefilled (fully revealed) tiles.
                 if (day === null) {
                   return (
-                    <div key={i} className="relative aspect-square overflow-hidden rounded-md opacity-60">
-                      <PaintTile col={col} row={row} cols={cols} rows={rows} reveal={1} />
+                    <div key={i} className="relative aspect-square overflow-hidden rounded-md">
+                      <PaintTile col={col} row={row} cols={cols} rows={rows} reveal={1} image={painting} />
                     </div>
                   );
                 }
@@ -309,12 +407,12 @@ export default function Home() {
                   <button
                     key={i}
                     onClick={() => setSelectedDay(isSelected ? null : day)}
-                    title={`Day ${day} — ${completed[day]?.size ?? 0}/${HABITS.length} habits`}
+                    title={`Day ${day} — ${daysDone[day]?.size ?? 0}/${HABITS.length} habits`}
                     className={`relative aspect-square overflow-hidden rounded-md transition-transform hover:scale-105 ${
-                      isSelected ? "ring-2 ring-[#39d353] ring-offset-2 ring-offset-white" : ""
+                      isSelected ? "ring-2 ring-accent ring-offset-2 ring-offset-white" : ""
                     }`}
                   >
-                    <PaintTile col={col} row={row} cols={cols} rows={rows} reveal={reveal} />
+                    <PaintTile col={col} row={row} cols={cols} rows={rows} reveal={reveal} image={painting} />
                     <span
                       className="absolute left-1 top-0.5 text-[10px] font-medium"
                       style={{ color: reveal > 0.5 ? "#0d1117" : "#8c867b" }}
@@ -331,7 +429,7 @@ export default function Home() {
               <div className="mt-5 rounded-lg border border-[#e6e1d7] bg-[#f0ede6] p-4">
                 <div className="mb-3 flex items-center justify-between">
                   <h3 className="text-sm font-semibold">
-                    {MONTH_NAMES[MONTH]} {selectedDay}
+                    {MONTH_NAMES[month]} {selectedDay}
                   </h3>
                   <span className="text-xs text-[#8c867b]">
                     {Math.round(revealFor(selectedDay) * 100)}% revealed
@@ -339,7 +437,7 @@ export default function Home() {
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   {HABITS.map((h) => {
-                    const done = completed[selectedDay]?.has(h.id) ?? false;
+                    const done = daysDone[selectedDay]?.has(h.id) ?? false;
                     return (
                       <button
                         key={h.id}
@@ -385,8 +483,8 @@ export default function Home() {
 
           {/* Right column */}
           <div className="flex w-full flex-col gap-6 xl:w-80">
-            <YearInArt />
-            <YearProgress />
+            <YearInArt viewMonth={month} latest={LATEST_MONTH} onSelect={goToMonth} />
+            <YearProgress latest={LATEST_MONTH} />
           </div>
         </div>
       </main>
@@ -446,6 +544,13 @@ function IconLeaf({ className }: IconProps) {
     <svg className={className} viewBox="0 0 24 24" fill="currentColor">
       <path d="M5 21c0-6 3-11 9-13 4-1.3 7-1 7-1s.3 3-1 7c-2 6-7 9-13 9a8 8 0 01-2-.3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M5 21c3-5 7-8 11-9" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+function IconChevron({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M15 6l-6 6 6 6" />
     </svg>
   );
 }
